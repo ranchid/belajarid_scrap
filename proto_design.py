@@ -2,8 +2,16 @@ import csv
 import json
 import asyncio
 import httpx
+import logging
+import sys
 
 from httpx import ReadTimeout, RemoteProtocolError
+
+logstream_handler = logging.StreamHandler(stream=sys.stdout)
+logging.basicConfig(handlers=[logstream_handler],
+                    format='%(asctime)s.%(msecs)d %(name)s %(levelname)s %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S',
+                    level=logging.INFO)
 
 TARGET_BASE_URL = 'https://api.data.belajar.id/data-portal-backend/v1/master-data/'
 
@@ -87,4 +95,44 @@ def crawl_schlists(lv3_codeareas:list, batch_limit:int=50) -> list:
     
     repack_data = unnest_data(sch_list)
 
+    return repack_data
+
+def fetch_schdetail(npsn:str) -> dict:
+    detail_url = f'{TARGET_BASE_URL}satuan-pendidikan/details/{npsn}'
+    fetch_raw = httpx.get(detail_url).content
+    raw_data = json.loads(fetch_raw)
+    srv_timestamp = raw_data['meta']['lastUpdatedAt']
+    data = raw_data['satuanPendidikan']
+    detail_data = dict(data, serverTimestamp=srv_timestamp)
+
+    return detail_data
+
+def crawl_schdetail(list_npsn:list, batch_limit:int=50) -> list:
+    async def _crawl(_npsn:str) -> dict:
+        async with httpx.AsyncClient(timeout=None) as client:
+            detail_url = f'{TARGET_BASE_URL}satuan-pendidikan/details/{_npsn}'
+            fetch_raw = await client.get(detail_url)
+            match fetch_raw.status_code:
+                case 200:
+                    raw_data = json.loads(fetch_raw.content)
+                    srv_timestamp = raw_data['meta']['lastUpdatedAt']
+                    data = raw_data['satuanPendidikan']
+                    detail_data = dict(data, serverTimestamp=srv_timestamp)
+
+                    return detail_data
+                case 404:
+                    detail_data = {'npsn':_npsn, 'detail_url': detail_url, 'error':'HTTP/1.1 404 Not Found' }
+                    logging.warn(f"server kentod, npsn {_npsn} g onok mbut")
+                    return detail_data
+                case _:
+                    logging.warn('unknown error')
+                    pass
+    
+    list_detail = []
+    for subset in paginator(list_npsn, batch_limit):
+        joblist = [_crawl(npsn) for npsn in subset]
+        sequences = asyncio.run(job_aggregator(joblist))
+        list_detail.append(sequences)
+
+    repack_data = unnest_data(list_detail)
     return repack_data
