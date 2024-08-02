@@ -38,7 +38,7 @@ def fetch_subarea(parent_area:str) -> list:
     
     return data
 
-def crawl_subareas(parent_area:list) -> list:    
+def crawl_subareas(parent_areas:list) -> list:    
     async def _crawl(_area:str) -> dict:
         async with httpx.AsyncClient(timeout=None) as client:
             parent_url = f'{TARGET_BASE_URL}satuan-pendidikan/statistics/{_area}/descendants?sortBy=bentuk_pendidikan&sortDir=asc'
@@ -47,7 +47,7 @@ def crawl_subareas(parent_area:list) -> list:
             parsed_data = parse_subarea(resp,_area)
             
             return parsed_data
-    joblist = [_crawl(area) for area in parent_area]
+    joblist = [_crawl(area) for area in parent_areas]
     grab_data = asyncio.run(job_aggregator(joblist))
 
     repack_data = unnest_data(grab_data)
@@ -55,21 +55,28 @@ def crawl_subareas(parent_area:list) -> list:
     return repack_data
 
 def fetch_schlist(lv3_codearea:str) -> list:
+    metadata_url = f'{TARGET_BASE_URL}satuan-pendidikan/statistics/{lv3_codearea}'
     data_url = f'{TARGET_BASE_URL}satuan-pendidikan/download?kodeKecamatan={lv3_codearea}&sortBy=bentuk_pendidikan&sortDir=asc&format=csv'
+    fetch_metadata = httpx.get(metadata_url).content.decode('UTF-8')
     fetch_raw = httpx.get(data_url).content.decode('UTF-8')
+    srv_timestamp = json.loads(fetch_metadata)['meta']['lastUpdatedAt']
     parse_data =  csv.DictReader(fetch_raw.splitlines())
-    stacked = [i for i in parse_data]
+    stacked = [dict(i, kodeKec=lv3_codearea, serverTimestamp=srv_timestamp) for i in parse_data]
 
     return stacked
 
 def crawl_schlists(lv3_codeareas:list, batch_limit:int=50) -> list:
     async def _crawl(_area:str) -> list:
         async with httpx.AsyncClient(timeout=None) as client:
+            metadata_url = f'{TARGET_BASE_URL}satuan-pendidikan/statistics/{_area}'
             data_url = f'{TARGET_BASE_URL}satuan-pendidikan/download?kodeKecamatan={_area}&sortBy=bentuk_pendidikan&sortDir=asc&format=csv'
+            fetch_metadata = await client.get(metadata_url)
             fetch_raw = await client.get(data_url)
+            metadata = fetch_metadata.content.decode('UTF-8')
             resp = fetch_raw.content.decode('UTF-8')
+            srv_timestamp = json.loads(metadata)['meta']['lastUpdatedAt']
             parse_data =  csv.DictReader(resp.splitlines())
-            stacked = [i for i in parse_data]
+            stacked = [dict(i, kodeKec=_area, serverTimestamp=srv_timestamp) for i in parse_data]
             
             return stacked
     sch_list = []
