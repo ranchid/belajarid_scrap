@@ -4,6 +4,10 @@ import asyncio
 import httpx
 import logging
 import sys
+import string
+import random
+
+import os
 
 from httpx import ReadTimeout, RemoteProtocolError
 
@@ -17,19 +21,14 @@ TARGET_BASE_URL = 'https://api.data.belajar.id/data-portal-backend/v1/master-dat
 
 MAIN_AREA = '360'
 
-def parse_subarea(decoded_content:str, parent:str) -> list:
-    area_list = []
-    for area in json.loads(decoded_content)['data']:
-        data = area['district']
-        data['kodeIndukWilayah'] = parent
-        area_list.append(data)
-
-    return area_list
-
 def unnest_data(nested_data:list) -> list:
     flatten_data = [datum for array_datum in nested_data for datum in array_datum]
     return flatten_data
 
+def randstr(n:int) -> str:
+    chars = string.ascii_letters+string.digits
+    randout = ''.join(random.choice(chars) for i in range(n))
+    return randout
 
 def paginator(items:list, items_per_page:int):
     pages = [items[item:item+items_per_page] for item in range(0, len(items), items_per_page)]
@@ -38,6 +37,15 @@ def paginator(items:list, items_per_page:int):
 async def job_aggregator(job_list):
     job_agg = await asyncio.gather(*job_list)
     return job_agg
+
+def parse_subarea(decoded_content:str, parent:str) -> list:
+    area_list = []
+    for area in json.loads(decoded_content)['data']:
+        data = area['district']
+        data['kodeIndukWilayah'] = parent
+        area_list.append(data)
+
+    return area_list
 
 def fetch_subarea(parent_area:str) -> list:
     parent_url = f'{TARGET_BASE_URL}satuan-pendidikan/statistics/{parent_area}/descendants?sortBy=bentuk_pendidikan&sortDir=asc'
@@ -74,6 +82,7 @@ def fetch_schlist(lv3_codearea:str) -> list:
     return stacked
 
 def crawl_schlists(lv3_codeareas:list, batch_limit:int=50) -> list:
+    os.makedirs('tmp', exist_ok=True)
     async def _crawl(_area:str) -> list:
         async with httpx.AsyncClient(timeout=None) as client:
             metadata_url = f'{TARGET_BASE_URL}satuan-pendidikan/statistics/{_area}'
@@ -108,6 +117,8 @@ def fetch_schdetail(npsn:str) -> dict:
     return detail_data
 
 def crawl_schdetail(list_npsn:list, batch_limit:int=50) -> list:
+    os.makedirs('tmp', exist_ok=True)
+    proc_id = randstr(10)
     async def _crawl(_npsn:str) -> dict:
         async with httpx.AsyncClient(timeout=None) as client:
             detail_url = f'{TARGET_BASE_URL}satuan-pendidikan/details/{_npsn}'
@@ -128,11 +139,18 @@ def crawl_schdetail(list_npsn:list, batch_limit:int=50) -> list:
                     logging.warn('unknown error')
                     pass
     
-    list_detail = []
-    for subset in paginator(list_npsn, batch_limit):
-        joblist = [_crawl(npsn) for npsn in subset]
-        sequences = asyncio.run(job_aggregator(joblist))
-        list_detail.append(sequences)
-
-    repack_data = unnest_data(list_detail)
-    return repack_data
+    with open(f'tmp/{proc_id}.tmp', mode='a') as f:
+        for subset in paginator(list_npsn, batch_limit):
+            joblist = [_crawl(npsn) for npsn in subset]
+            sequences = asyncio.run(job_aggregator(joblist))
+            for i in sequences:
+                f.write(json.dumps(i))
+                f.write('\n')
+    
+    with open(f'tmp/{proc_id}.tmp', mode='r') as f:
+        _cache = f.read().splitlines()
+        _output = [json.loads(j) for j in _cache ]
+        f.close()
+    os.remove(f'tmp/{proc_id}.tmp')
+    
+    return _output
