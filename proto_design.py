@@ -170,13 +170,12 @@ def crawl_schdetail(list_npsn:list, tmp_path:str=TMP_PATH, batch_limit:int=50) -
     
     return _output
 
-def main(kabkot_filter:list=None, detail:bool=False,repo_arcode:str='kode_jatim.csv') -> list:
+def main(kabkot_filter:list=None, detail:bool=False,repo_arcode:str='kode_jatim.json') -> list:
     os.makedirs(OUTPUT_PATH, exist_ok=True)
     logging.info("----------SCRAP INIT----------")
     def _filter_area():    
         with open(repo_arcode, mode='r') as repo:
-            _ar = repo.read().splitlines()
-            _ar_obj = csv.DictReader(_ar)
+            _ar_obj = json.loads(repo.read())
             try:
                 match kabkot_filter is None or kabkot_filter == ['']:
                     case True:
@@ -208,18 +207,22 @@ def main(kabkot_filter:list=None, detail:bool=False,repo_arcode:str='kode_jatim.
 
 if __name__ == "__main__":
     import argparse
-    import re
+    import shutil
+
     parsecmd = argparse.ArgumentParser(description="Sedot Data sekolahan")
-    parsecmd.add_argument('kabkot', help="Filter kode kabupaten kota e, nek luwih teko siji delimiter nganggo koma(,) contoh nek kediri hiri-hiri:051300,056300\nNah nek mok kosongi bakal nyikat sak jatim")
+    parsecmd.add_argument('kabkot', nargs='?', help="file .txt gae filter kode kabupaten/kota e, nek mok kosongi bakal nyikat data sak jatim")
     parsecmd.add_argument('--detail', action=argparse.BooleanOptionalAction, default=False, help="Nek pengen nyikat sak data detail sekolahan e sisan, default e tanpa detail")
     arguments = parsecmd.parse_args()
-    # print(arguments.detail)
+    # print(arguments.kabkot == None)
     try:
-        kabkot_list = re.split(r',', arguments.kabkot)
-        main(kabkot_filter=kabkot_list, detail=arguments.detail)
-    except KeyboardInterrupt:
-        notif = input('Yakin leren? y|n')
-        if notif.casefold() == 'y':
-            os.remove(f'{TMP_PATH}/*')
-            sys.exit(0)
-        pass
+        if arguments.kabkot == None:
+            main(detail=arguments.detail)
+        with open(arguments.kabkot, mode='r') as f:
+            kabkot_list = f.read().splitlines()
+            main(kabkot_filter=kabkot_list, detail=arguments.detail)
+    except FileNotFoundError:
+        print('File e g ketemu bos')
+    except KeyboardInterrupt:    
+        shutil.rmtree(f'{TMP_PATH}')
+        print('\nLheh nggondok, di-cancel')
+        sys.exit(0)
