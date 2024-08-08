@@ -6,20 +6,26 @@ import logging
 import sys
 import string
 import random
-
 import os
+import datetime
+import pandas
 
-from httpx import ReadTimeout, RemoteProtocolError
 
-logstream_handler = logging.StreamHandler(stream=sys.stdout)
-logging.basicConfig(handlers=[logstream_handler],
-                    format='%(asctime)s.%(msecs)d %(name)s %(levelname)s %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO)
 
 TARGET_BASE_URL = 'https://api.data.belajar.id/data-portal-backend/v1/master-data/'
 
 MAIN_AREA = '360'
+TMP_PATH = 'tmp'
+OUTPUT_PATH = 'output'
+timestamp = datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H_%M_%S %Z')
+
+
+logstream_handler = logging.StreamHandler(stream=sys.stdout)
+logging.basicConfig(handlers=[logstream_handler],
+                    format='%(asctime)s %(name)s %(levelname)s %(message)s',
+                    level=logging.INFO)
+logging.Formatter.formatTime = (lambda self, record, datefmt=None: datetime.datetime.fromtimestamp(record.created, datetime.timezone.utc).astimezone().isoformat())
+
 
 def unnest_data(nested_data:list) -> list:
     flatten_data = [datum for array_datum in nested_data for datum in array_datum]
@@ -81,8 +87,9 @@ def fetch_schlist(lv3_codearea:str) -> list:
 
     return stacked
 
-def crawl_schlists(lv3_codeareas:list, batch_limit:int=50) -> list:
-    os.makedirs('tmp', exist_ok=True)
+def crawl_schlists(lv3_codeareas:list, batch_limit:int=50, tmp_path:str=TMP_PATH) -> list:
+    os.makedirs(tmp_path, exist_ok=True)
+    proc_id = randstr(10)
     async def _crawl(_area:str) -> list:
         async with httpx.AsyncClient(timeout=None) as client:
             metadata_url = f'{TARGET_BASE_URL}satuan-pendidikan/statistics/{_area}'
@@ -96,15 +103,23 @@ def crawl_schlists(lv3_codeareas:list, batch_limit:int=50) -> list:
             stacked = [dict(i, kodeKec=_area, serverTimestamp=srv_timestamp) for i in parse_data]
             
             return stacked
-    sch_list = []
-    for subset in paginator(lv3_codeareas, batch_limit):
-        joblist = [_crawl(area) for area in subset]
-        sequences = asyncio.run(job_aggregator(joblist))
-        sch_list.append(unnest_data(sequences))
-    
-    repack_data = unnest_data(sch_list)
 
-    return repack_data
+    with open(f'{tmp_path}/{proc_id}.tmp', mode='a') as f:
+        for subset in paginator(lv3_codeareas, batch_limit):
+            joblist = [_crawl(kodekec) for kodekec in subset]
+            sequences = asyncio.run(job_aggregator(joblist))
+            sch_list2 = unnest_data(sequences)
+            for i in sch_list2:
+                f.write(json.dumps(i))
+                f.write('\n')
+    
+    with open(f'{tmp_path}/{proc_id}.tmp', mode='r') as f:
+        _cache = f.read().splitlines()
+        _output = [json.loads(j) for j in _cache ]
+        f.close()
+    os.remove(f'{tmp_path}/{proc_id}.tmp')
+
+    return _output
 
 def fetch_schdetail(npsn:str) -> dict:
     detail_url = f'{TARGET_BASE_URL}satuan-pendidikan/details/{npsn}'
@@ -116,8 +131,8 @@ def fetch_schdetail(npsn:str) -> dict:
 
     return detail_data
 
-def crawl_schdetail(list_npsn:list, batch_limit:int=50) -> list:
-    os.makedirs('tmp', exist_ok=True)
+def crawl_schdetail(list_npsn:list, tmp_path:str=TMP_PATH, batch_limit:int=50) -> list:
+    os.makedirs(TMP_PATH, exist_ok=True)
     proc_id = randstr(10)
     async def _crawl(_npsn:str) -> dict:
         async with httpx.AsyncClient(timeout=None) as client:
@@ -139,7 +154,7 @@ def crawl_schdetail(list_npsn:list, batch_limit:int=50) -> list:
                     logging.warn('unknown error')
                     pass
     
-    with open(f'tmp/{proc_id}.tmp', mode='a') as f:
+    with open(f'{tmp_path}/{proc_id}.tmp', mode='a') as f:
         for subset in paginator(list_npsn, batch_limit):
             joblist = [_crawl(npsn) for npsn in subset]
             sequences = asyncio.run(job_aggregator(joblist))
@@ -147,10 +162,64 @@ def crawl_schdetail(list_npsn:list, batch_limit:int=50) -> list:
                 f.write(json.dumps(i))
                 f.write('\n')
     
-    with open(f'tmp/{proc_id}.tmp', mode='r') as f:
+    with open(f'{tmp_path}/{proc_id}.tmp', mode='r') as f:
         _cache = f.read().splitlines()
         _output = [json.loads(j) for j in _cache ]
         f.close()
-    os.remove(f'tmp/{proc_id}.tmp')
+    os.remove(f'{tmp_path}/{proc_id}.tmp')
     
     return _output
+
+def main(kabkot_filter:list=None, detail:bool=False,repo_arcode:str='kode_jatim.csv') -> list:
+    os.makedirs(OUTPUT_PATH, exist_ok=True)
+    logging.info("----------SCRAP INIT----------")
+    def _filter_area():    
+        with open(repo_arcode, mode='r') as repo:
+            _ar = repo.read().splitlines()
+            _ar_obj = csv.DictReader(_ar)
+            try:
+                match kabkot_filter is None or kabkot_filter == ['']:
+                    case True:
+                        _area = [i['kodeKec'] for i in _ar_obj]
+                        return _area
+                    case False:
+                        rm_redundant = list(set(kabkot_filter))
+                        _area = [i['kodeKec'] for i in _ar_obj if i['kodeKabKot'] in rm_redundant]
+                        return _area
+            except TypeError:
+                return 'invalid_input'
+    sel_area = _filter_area()
+    if sel_area != 'invalid_input':
+        list_data = crawl_schlists(sel_area)
+        pandas.DataFrame(list_data).to_excel(f'{OUTPUT_PATH}/list_{timestamp}.xlsx', index=False)
+        match detail:
+            case True:
+                npsn_list = [dtl['NPSN'] for dtl in list_data]
+                detail = crawl_schdetail(npsn_list)
+                pandas.DataFrame(detail).to_excel(f'{OUTPUT_PATH}/detail_{timestamp}.xlsx', index=False)
+                logging.info("----------SCRAP DONE----------")
+                return print(f'DONE, kesimpen nang {OUTPUT_PATH}/list_{timestamp}.xlsx\nambek nang {OUTPUT_PATH}/detail_{timestamp}.xlsx ')
+            case False:
+                logging.info("----------SCRAP DONE----------")             
+                return print(f'DONE, kesimpen nang {OUTPUT_PATH}/list_{timestamp}.xlsx')
+    logging.info("----------CANCELLED----------")
+    return print(f'{sel_area}')
+
+
+if __name__ == "__main__":
+    import argparse
+    import re
+    parsecmd = argparse.ArgumentParser(description="Sedot Data sekolahan")
+    parsecmd.add_argument('kabkot', help="Filter kode kabupaten kota e, nek luwih teko siji delimiter nganggo koma(,) contoh nek kediri hiri-hiri:051300,056300\nNah nek mok kosongi bakal nyikat sak jatim")
+    parsecmd.add_argument('--detail', action=argparse.BooleanOptionalAction, default=False, help="Nek pengen nyikat sak data detail sekolahan e sisan, default e tanpa detail")
+    arguments = parsecmd.parse_args()
+    # print(arguments.detail)
+    try:
+        kabkot_list = re.split(r',', arguments.kabkot)
+        main(kabkot_filter=kabkot_list, detail=arguments.detail)
+    except KeyboardInterrupt:
+        notif = input('Yakin leren? y|n')
+        if notif.casefold() == 'y':
+            os.remove(f'{TMP_PATH}/*')
+            sys.exit(0)
+        pass
